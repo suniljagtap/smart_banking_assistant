@@ -1,31 +1,343 @@
+import base64
+import hashlib
+import json
 import os
+import pathlib
+
 from dotenv import load_dotenv
-from langchain_postgres import PGVector
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.utilities import SQLDatabase
-
 
 load_dotenv()
 
 
-model = os.getenv("OPENAI_EMBEDDING_MODEL")
-api_key = os.getenv("OPENAI_API_KEY")
+_API_KEY = os.getenv("OPENAI_API_KEY")
 pg_vector_connection = os.getenv("PG_CONNECTION_STRING")
 pg_rdbms_connection = os.getenv("PG_RDBMS_CONNECTION_STRING")
 
+_PG_DSN = os.getenv("PG_CONNECTION_STRING_FTS")
+_EMBED_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
+_embeddings = OpenAIEmbeddings(
+    model=_EMBED_MODEL,
+    api_key=_API_KEY,
+    # dimensions=1024   # default is 1536, when you not set this
+)
 
 
 def get_sql_database() -> SQLDatabase:
-   """
-   uses read only credentials and connect to rdbms.
-   and targets specific tables our agent can access
-   """
-   if not pg_rdbms_connection:
-       raise ValueError("PG_RDBMS_CONNECTION_STRING is not set. Check your .env")
-   else:
-       return SQLDatabase.from_uri(
-           pg_rdbms_connection,
-           include_tables=["accounts", "transactions", "loan_accounts", "fixed_deposits","credit_cards","card_transactions"],
-           # TODO: sample rows in table info
-       )
+    """
+    uses read only credentials and connect to rdbms.
+    and targets specific tables our agent can access
+    """
+    if not pg_rdbms_connection:
+        raise ValueError("PG_RDBMS_CONNECTION_STRING is not set. Check your .env")
+    else:
+        return SQLDatabase.from_uri(
+            pg_rdbms_connection,
+            include_tables=[
+                "accounts",
+                "transactions",
+                "loan_accounts",
+                "fixed_deposits",
+                "credit_cards",
+                "card_transactions",
+            ],
+            # TODO: sample rows in table info
+        )
+
+
+def _embed_texts(texts: list[str]) -> list[list[float]]:
+    """Embed a batch of text strings with OpenAI text-embedding-3-small.
+
+    OpenAIEmbeddings handles request batching internally, so we pass the whole
+    list and get back one 1536-dimensional vector per input string.
+    """
+    return _embeddings.embed_documents(texts)
+
+
+# Lazy connection pool — reuses existing TCP connections instead of opening a new one per request.
+_pool: ConnectionPool | None = None
+
+
+def _get_pool() -> ConnectionPool:
+    """Return the module-level connection pool, creating it on first call."""
+    global _pool
+    if _pool is None:
+        _pool = ConnectionPool(
+            _PG_DSN,
+            min_size=2,
+            max_size=10,
+            kwargs={"row_factory": dict_row},
+        )
+    return _pool
+
+
+def get_db_conn():
+    """Return a pooled connection context manager.
+
+    Usage:
+        with get_db_conn() as conn:
+            with conn.cursor() as cur: ...
+    """
+    return _get_pool().connection()
+
+
+# Document registry
+def upsert_document(filename: str, source_path: str) -> str:
+    """Insert a document record and return its UUID.
+
+    Uses ON CONFLICT so re-ingesting the same filename updates the path
+    and returns the *existing* doc_id rather than creating a duplicate.
+    This makes ingestion idempotent at the document level.
+    """
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO documents (filename, source_path)
+                VALUES (%s, %s)
+                ON CONFLICT (filename) DO UPDATE
+                    SET source_path = EXCLUDED.source_path,
+                        ingested_at  = now()
+                RETURNING id
+                """,
+                (filename, source_path),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    return str(row["id"])
+
+
+# Chunk storage
+def store_chunks(chunks: list[dict], doc_id: str) -> int:
+    """Embed each chunk and insert it into the multimodal_chunks table.
+
+    Args:
+        chunks:  List of dicts produced by parse_document() / ingestion.py.
+                 Each dict must have: content (str), content_type (str),
+                 metadata (dict with page_number, section, source_file,
+                 element_type, position, image_base64).
+        doc_id:  UUID string of the parent document (from upsert_document).
+
+    Returns:
+        Number of rows inserted.
+
+    Embedding strategy:
+        Every chunk — text, table, and image — is embedded from its `content`
+        text via _embed_texts() (OpenAI text-embedding-3-small). Image chunks
+        carry a vision-generated description as their content, so they remain
+        retrievable by natural-language queries even though OpenAI embeddings
+        cannot read pixels directly.
+
+    Vector storage:
+        pgvector accepts the '[f1,f2,…]' string literal when cast with
+        ::vector. We build that string directly to avoid needing the
+        separate pgvector Python package.
+
+    Image storage:
+        image_base64 from metadata is decoded to raw bytes and stored in
+        the BYTEA column. The JSONB metadata column does NOT duplicate it,
+        keeping metadata lean.
+    """
+    if not chunks:
+        return 0
+
+    # Compute embeddings
+    all_embeddings = _embed_texts([chunk["content"] for chunk in chunks])
+
+    # Insert rows
+    _DEDICATED_COLUMNS = {
+        "content_type",
+        "element_type",
+        "section",
+        "page_number",
+        "source_file",
+        "position",
+        "image_base64",
+    }
+
+    rows_inserted = 0
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            # Delete stale chunks before re-inserting so that
+            # re-ingesting the same document does not create duplicates.
+            cur.execute(
+                "DELETE FROM multimodal_chunks WHERE doc_id = %s::uuid",
+                (doc_id,),
+            )
+
+            for chunk, embedding in zip(chunks, all_embeddings):
+                meta = chunk["metadata"]
+
+                # Save image bytes to the filesystem and store
+                # only the file path in the DB. This avoids bloating PostgreSQL
+                # with large BYTEA columns that slow down vacuuming and queries.
+                img_b64 = meta.get("image_base64")
+                image_path: str | None = None
+                mime_type = "image/png" if img_b64 else None
+                if img_b64:
+                    image_bytes = base64.b64decode(img_b64)
+                    img_dir = pathlib.Path("data/images")
+                    img_dir.mkdir(parents=True, exist_ok=True)
+                    img_hash = hashlib.sha256(image_bytes).hexdigest()[:16]
+                    img_file = img_dir / f"{doc_id}_{img_hash}.png"
+                    img_file.write_bytes(image_bytes)
+                    image_path = str(img_file)
+
+                embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
+
+                # Exclude fields that already have dedicated columns from JSONB.
+                clean_meta = {
+                    k: v for k, v in meta.items() if k not in _DEDICATED_COLUMNS
+                }
+
+                cur.execute(
+                    """
+                    INSERT INTO multimodal_chunks (
+                        doc_id, chunk_type, element_type, content,
+                        image_path, mime_type,
+                        page_number, section, source_file,
+                        position, embedding, metadata
+                    ) VALUES (
+                        %s::uuid, %s, %s, %s,
+                        %s, %s,
+                        %s, %s, %s,
+                        %s::jsonb, %s::vector, %s::jsonb
+                    )
+                    """,
+                    (
+                        doc_id,
+                        chunk["content_type"],  # chunk_type column
+                        meta.get("element_type"),  # raw Docling label
+                        chunk["content"],  # text / markdown / caption
+                        image_path,  # filesystem path (None for text/table)
+                        mime_type,
+                        meta.get("page_number"),
+                        meta.get("section"),
+                        meta.get("source_file"),
+                        (
+                            json.dumps(meta.get("position"))
+                            if meta.get("position")
+                            else None
+                        ),
+                        embedding_str,  # ::vector cast
+                        json.dumps(clean_meta),  # JSONB catch-all
+                    ),
+                )
+                rows_inserted += 1
+        conn.commit()
+
+    return rows_inserted
+
+
+# Similarity search
+def similarity_search(
+    query: str,
+    k: int = 5,
+    chunk_type: str | None = None,
+) -> list[dict]:
+    """Find the k most similar chunks to a natural-language query.
+
+    Args:
+        query:      Natural-language question or search string.
+        k:          Number of results to return.
+        chunk_type: Optional filter — 'text', 'table', or 'image'.
+
+    Returns:
+        List of dicts with keys: content, chunk_type, page_number, section,
+        source_file, element_type, image_base64, mime_type, position,
+        metadata, similarity (0-1 cosine similarity score).
+
+    The <=> operator is pgvector's cosine distance operator.
+    Similarity = 1 - cosine_distance, so 1.0 = identical, 0.0 = orthogonal.
+    """
+    # Embed the query into the same vector space as the stored chunks. Image
+    # chunks were embedded from their text descriptions, so a text query can
+    # match them too.
+    query_vec = _embed_texts([query])[0]
+    embedding_str = "[" + ",".join(str(v) for v in query_vec) + "]"
+
+    # Conditionally add a chunk_type filter without SQL injection risk
+    # (chunk_type is always passed as a parameterised value, never interpolated)
+    type_clause = "AND chunk_type = %(chunk_type)s" if chunk_type else ""
+
+    sql = f"""
+        SELECT
+            content, chunk_type, page_number, section,
+            source_file, element_type, image_path, mime_type,
+            position, metadata,
+            1 - (embedding <=> %(vec)s::vector) AS similarity
+        FROM multimodal_chunks
+        WHERE 1=1 {type_clause}
+        ORDER BY embedding <=> %(vec)s::vector
+        LIMIT %(k)s
+    """
+
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, {"vec": embedding_str, "chunk_type": chunk_type, "k": k})
+            rows = cur.fetchall()
+
+    # Read image from filesystem and re-encode as base64 for callers.
+    results = []
+    for row in rows:
+        row = dict(row)
+        img_path = row.pop("image_path", None)
+        if img_path and os.path.exists(img_path):
+            row["image_base64"] = base64.b64encode(
+                pathlib.Path(img_path).read_bytes()
+            ).decode()
+        else:
+            row["image_base64"] = None
+        results.append(row)
+
+    return results
+
+
+# Chunk listing (for preview / debugging)
+def get_all_chunks(chunk_type: str | None = None, limit: int = 200) -> list[dict]:
+    """Return all stored chunks, optionally filtered by type.
+
+    Args:
+        chunk_type: Optional filter — 'text', 'table', or 'image'.
+        limit:      Max rows to return (default 200, safety cap).
+
+    Returns:
+        List of dicts with keys: id, content, chunk_type, page_number,
+        section, source_file, element_type, image_base64, mime_type,
+        position, metadata.
+    """
+    type_clause = "WHERE chunk_type = %(chunk_type)s" if chunk_type else ""
+
+    sql = f"""
+        SELECT
+            id, content, chunk_type, page_number, section,
+            source_file, element_type, image_path, mime_type,
+            position, metadata
+        FROM multimodal_chunks
+        {type_clause}
+        ORDER BY page_number ASC NULLS LAST, id ASC
+        LIMIT %(limit)s
+    """
+
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, {"chunk_type": chunk_type, "limit": limit})
+            rows = cur.fetchall()
+
+    results = []
+    for row in rows:
+        row = dict(row)
+        img_path = row.pop("image_path", None)
+        if img_path and os.path.exists(img_path):
+            row["image_base64"] = base64.b64encode(
+                pathlib.Path(img_path).read_bytes()
+            ).decode()
+        else:
+            row["image_base64"] = None
+        results.append(row)
+
+    return results
