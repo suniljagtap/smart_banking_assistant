@@ -1,24 +1,19 @@
 from fastapi import FastAPI
 from src.api.v1.routes import query
-
+from src.api.v1.routes import upload
 
 app = FastAPI()
 
 
-
-
 @app.get("/")
 async def root():
-   return {"message": "Hello World"}
-
-
+    return {"message": "Hello World"}
 
 
 @app.get("/health")
 def health_check():
-   return {"status": "ok"}
-
-
+    return {"status": "ok"}
 
 
 app.include_router(query.router)
+app.include_router(upload.router)
