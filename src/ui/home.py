@@ -18,7 +18,7 @@ QUERY_STREAM_API_URL = "http://localhost:8000/api/v1/query/stream"
 UPLOAD_API_URL = "http://localhost:8000/api/v1/admin/upload"
 
 REQUEST_TIMEOUT = 60
-UPLOAD_TIMEOUT = 60
+UPLOAD_TIMEOUT = 120
 
 
 # Custom Styling
