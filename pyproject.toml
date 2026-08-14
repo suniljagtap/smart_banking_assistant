@@ -16,5 +16,7 @@ dependencies = [
     "langsmith>=0.10.16",
     "python-dotenv>=1.2.2",
     "python-multipart>=0.0.32",
+    "streamlit>=1.61.1",
+    "streamlit-option-menu>=0.4.0",
     "uvicorn>=0.52.1",
 ]
