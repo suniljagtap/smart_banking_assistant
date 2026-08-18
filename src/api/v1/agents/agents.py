@@ -78,6 +78,7 @@ def rag_retriever(state: RAGState) -> RAGState:
         - Select only one tool per invocation.
         Mandatory citation:
         - Every rule check, threshold evaluation, or decision should include an inline citation.
+        - Include citations(just for banking output), just page_numbers and section (e.g. page_number: 1, section: "1.1 Product Overview") in the output.
         - If a retrieved chunk is missing a page or clause number, use the document source name.
                    """,
             ),
@@ -358,7 +359,7 @@ def chit_chat_generator_node(state: RAGState) -> RAGState:
                 "system",
                 """
                 You are a helpful Smart Banking Assistant. Answer the user's question concisely.
-                Set policy_citations to empty string, page_no to 'N/A', and document_name to 'N/A'.
+                Set policy_citations to None, and document_name to None.
                    
                 DO NOT attempt to answer the user's question yourself or use your own knowledge.
                 Instead, use the retrieved documents and chat history to generate a response.
@@ -389,7 +390,8 @@ def chit_chat_generator_node(state: RAGState) -> RAGState:
     )
     print("[chit_chat_node] Answer generated.")
     response = answer.model_dump()
-    response["policy_citations"] = "N/A"
+    response["policy_citations"] = ""
+    response["document_name"] = ""
     response["sql_query_executed"] = None
     response["doc_query_executed"] = None
     print(response)
@@ -412,8 +414,19 @@ def response_generator_node(state: RAGState) -> RAGState:
                 "system",
                 """You are a helpful data analyst. Answer the user's question using
                the SQL query results below. Be concise and format numbers/lists clearly.
-               Set policy_citations to empty string,
-               page_no to 'N/A', and document_name to 'smart_banking_assistant_DB'.""",
+
+               # Rules for the field "sql_query_executed" in response:
+                1. If the query was executed against the RDBMS, set sql_query_executed to generated_sql from state (state["generated_sql"]).
+                2. If the query was executed against the RAG system, set sql_query_executed to None.
+               
+               # POLICY CITATIONS RULE:
+                1. For RDBMS queries, set policy_citations to empty string, 
+                    page_no to 'N/A', and document_name to 'smart_banking_assistant_DB'
+                2. For RAG queries, extract the page number and section from the retrieved documents
+                3. If the retrieved document is missing a page or clause number, use the document source name.
+                4. If the retrieved document is missing a section, use the document source name.
+                5. Assign the citation to the relevant part of the answer, and include it in the policy_citations field.
+                """,
             ),
             (
                 "human",
@@ -438,8 +451,8 @@ def response_generator_node(state: RAGState) -> RAGState:
     )
     print("[nl2sql_node] Answer generated.")
     response = answer.model_dump()
-    response["policy_citations"] = "N/A"
-    response["sql_query_executed"] = query
+    # response["policy_citations"] = "N/A"
+    response["sql_query_executed"] = state.get("generated_sql") or None
     response["doc_query_executed"] = search_result
     print(response)
     # return the sql query is RAGState
