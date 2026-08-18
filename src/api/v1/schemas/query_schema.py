@@ -13,7 +13,7 @@ class QueryRequest(BaseModel):
 
 # query api endpoint response format
 class QueryResponse(BaseModel):
-   query: str
+   query: str 
    answer: str
    policy_citations: str
    page_no: str

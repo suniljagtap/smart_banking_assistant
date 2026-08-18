@@ -19,8 +19,8 @@ load_dotenv()
 #                       sentences cut at a boundary still appear in both chunks
 # Tables and images are never split — they must be stored as atomic units.
 # ---------------------------------------------------------------------------
-_TEXT_CHUNK_SIZE = 1500
-_TEXT_CHUNK_OVERLAP = 300
+_TEXT_CHUNK_SIZE = 512
+_TEXT_CHUNK_OVERLAP = 100
 
 
 def _split_text(text: str, chunk_size: int, overlap: int) -> list[str]:
