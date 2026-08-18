@@ -24,6 +24,7 @@ def call_file_ingestion(file):
             shutil.copyfileobj(file.file, buffer)
             print("File uploaded successfully.")
             print("File ingestion started...")
+            #print(str(file_path))
             run_ingestion(str(file_path))
     except Exception as e:
         raise HTTPException(
