@@ -1,5 +1,5 @@
 from src.api.v1.states.rag_state import RAGState
-from src.core.db import get_vector_store,get_db_connection_fts,get_db_connection
+from src.core.db import get_vector_store, get_db_connection_fts, get_db_connection
 import os
 import psycopg
 import psycopg2
@@ -14,7 +14,7 @@ from langchain_openai import OpenAIEmbeddings
 
 load_dotenv()
 
-#  select id,content,page_number,ts_rank_cd(fts_vector,websearch_to_tsquery('english',%s)) 
+#  select id,content,page_number,ts_rank_cd(fts_vector,websearch_to_tsquery('english',%s))
 #         as score
 #         from multimodal_chunks
 #         where fts_vector @@ websearch_to_tsquery('english',%s)
@@ -29,8 +29,9 @@ _EMBED_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 _embeddings = OpenAIEmbeddings(
     model=_EMBED_MODEL,
     api_key=_API_KEY,
-    dimensions=1536,   # default is 1536, when you not set this
+    dimensions=1536,  # default is 1536, when you not set this
 )
+
 
 def get_embedding(texts: list[str]) -> list[list[float]]:
     """Embed a batch of text strings with OpenAI text-embedding-3-small.
@@ -42,7 +43,7 @@ def get_embedding(texts: list[str]) -> list[list[float]]:
 
 
 @tool
-def fts_search_tool(query: str, k: int = 5) -> List[Dict[str,Any]]:
+def fts_search_tool(query: str, k: int = 5) -> List[Dict[str, Any]]:
     """
     use this tool for exact keyword matching, some technical term or document IDs,
     policy codes (e.g. POL-XX), RBI guidelines, acronyms (e.g. CIBIL, DTI, LTV),
@@ -50,7 +51,7 @@ def fts_search_tool(query: str, k: int = 5) -> List[Dict[str,Any]]:
     """
     print("Executing Full-Text Search [BM25] for: " + query)
     sql = """
-select id,content,page_number,ts_rank_cd(fts_vector,websearch_to_tsquery('english',%s)) 
+        select id,content,page_number,ts_rank_cd(fts_vector,websearch_to_tsquery('english',%s)) 
         as score
         from multimodal_chunks
         where fts_vector @@ websearch_to_tsquery('english',%s)
@@ -60,13 +61,12 @@ select id,content,page_number,ts_rank_cd(fts_vector,websearch_to_tsquery('englis
     with get_db_connection_fts() as conn:
         conn.rollback()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(sql,(str(query),str(query),int(k)))
+            cur.execute(sql, (str(query), str(query), int(k)))
             results = cur.fetchall()
             # print(f"DB RAW RESLTS COUNT: {len(results)}")
             # print(f"DB SAMPLE OUTPUT: {results[:1]}")
             return results
 
-  
 
 @tool
 def vector_search_tool(query: str, k: int = 5):
@@ -76,35 +76,36 @@ def vector_search_tool(query: str, k: int = 5):
     """
     print("Executing Vector Search for: " + query)
     query_vector = get_embedding(query)
-    if isinstance(query_vector[0],list):
-            query_vector = query_vector[0]
-    
+    if isinstance(query_vector[0], list):
+        query_vector = query_vector[0]
+
     query_vector_str = str(query_vector)
-    
+
     sql = """ 
             Select id, content,page_number,(1- (embedding <=> %s::vector)) as score
             from multimodal_chunks
-            order by embedding <==> %s:: vector asc
+            order by embedding <=> %s::vector asc
             LIMIT %s"""
     with get_db_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(sql,(str(query_vector_str),str(query_vector_str),int(k)))
+            cur.execute(sql, (str(query_vector_str), str(query_vector_str), int(k)))
             results = cur.fetchall()
             # print(f"DB RAW RESLTS COUNT: {len(results)}")
             # print(f"DB SAMPLE OUTPUT: {results[:1]}")
             return results
 
+
 @tool
-def hybrid_search_tool(query:str,k:int =5,rrf_k: int = 60) -> List[Dict[str,Any]]:
+def hybrid_search_tool(query: str, k: int = 5, rrf_k: int = 60) -> List[Dict[str, Any]]:
     """
-        use this tool for hybrid questions which has conceptual or semantic questions
-        with specific codes, IDs, or exact keywords.
+    use this tool for hybrid questions which has conceptual or semantic questions
+    with specific codes, IDs, or exact keywords.
     """
     query_vector = get_embedding(query)
-    
+
     print("Executing Hybrid Search for: " + query)
 
-    if isinstance(query_vector[0],list):
+    if isinstance(query_vector[0], list):
         query_vector = query_vector[0]
 
     query_vector_str = str(query_vector)
@@ -134,12 +135,12 @@ def hybrid_search_tool(query:str,k:int =5,rrf_k: int = 60) -> List[Dict[str,Any]
     fetch_limit = k * 3
 
     with get_db_connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(sql,
-                            (query_vector_str,fetch_limit,query,query,fetch_limit,k))
-                
-                results = cur.fetchall()
-                        # print(f"DB RAW RESLTS COUNT: {len(results)}")
-                        # print(f"DB SAMPLE OUTPUT: {results[:1]}")
-                return results
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                sql, (query_vector_str, fetch_limit, query, query, fetch_limit, k)
+            )
 
+            results = cur.fetchall()
+            # print(f"DB RAW RESLTS COUNT: {len(results)}")
+            # print(f"DB SAMPLE OUTPUT: {results[:1]}")
+            return results
