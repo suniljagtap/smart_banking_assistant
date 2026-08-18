@@ -86,13 +86,17 @@ def rag_retriever(state: RAGState) -> RAGState:
                 """
                    Question:
                    {query}
+                   ChatHistory:
+                   {chat_history}
                 """,
             ),
         ]
     )
 
     chain = prompt | llm_with_tools
-    decision = chain.invoke({"query": state["query"]})
+    decision = chain.invoke(
+        {"query": state["query"], "chat_history": state["chat_history"]}
+    )
 
     retrieved_docs = []
     if decision.tool_calls:
@@ -143,15 +147,19 @@ def query_classifier(state: RAGState) -> RAGState:
             (
                 "human",
                 """
-                   Question:
-                   {query}
+                    Question:
+                    {query}
+                    ChatHistory:
+                    {chat_history}
                 """,
             ),
         ]
     )
 
     chain = prompt | structured_llm
-    decision = chain.invoke({"query": state["query"]})
+    decision = chain.invoke(
+        {"query": state["query"], "chat_history": state["chat_history"]}
+    )
     print(f"[router_node's decision]: {decision.route} and reason: {decision.reason}")
     retry_count = 0
     return {**state, "route": decision.route, "retry_count": retry_count}
@@ -340,6 +348,54 @@ Do not list excessive synonyms or repeat words
     return {"query": new_query, "retry_count": new_count}
 
 
+def chit_chat_generator_node(state: RAGState) -> RAGState:
+    llm = _get_llm()
+    structured_llm = llm.with_structured_output(AIResponse)
+
+    chit_chat_prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """
+                You are a helpful Smart Banking Assistant. Answer the user's question concisely.
+                Set policy_citations to empty string, page_no to 'N/A', and document_name to 'N/A'.
+                   
+                DO NOT attempt to answer the user's question yourself or use your own knowledge.
+                Instead, use the retrieved documents and chat history to generate a response.
+
+                ## Guardrails:
+                - GUARDRAIL 1: If the user query is normal greetings or chitchat, 
+                    do not call any tools and reply with a polite greeting without mentioning banking. 
+                    For the casual conversation, focus entirely on a natural, friendly response. 
+                    Wwhen the user pauses, should you politely transition the conversation toward banking-related questions.
+                - GUARDRAIL 2: If the user query is not strictly related to the banking area
+                    (e.g., general knowledge, math, recipes, coding, geography, other products), you must not call any tool. 
+                    Instead stop further processing and strictly reply with: 
+                    "I do not know the answer to this question. Please ask me a banking-specific question."
+                - GUARDRAIL 3: Block any requests involving illegal advice, hacking, sensitive PII leakage, or malicious intent. 
+                    Reply: "Sorry, I cannot assist with that request."
+                """,
+            ),
+            (
+                "human",
+                "Question: {query}\n\n" "ChatHistory: {chat_history}",
+            ),
+        ]
+    )
+
+    chit_chat_chain = chit_chat_prompt | structured_llm
+    answer = chit_chat_chain.invoke(
+        {"query": state["query"], "chat_history": state["chat_history"]}
+    )
+    print("[chit_chat_node] Answer generated.")
+    response = answer.model_dump()
+    response["policy_citations"] = "N/A"
+    response["sql_query_executed"] = None
+    response["doc_query_executed"] = None
+    print(response)
+    return {**state, "response": response}
+
+
 def response_generator_node(state: RAGState) -> RAGState:
 
     # connect to LLM to get the natural language response
@@ -362,6 +418,7 @@ def response_generator_node(state: RAGState) -> RAGState:
             (
                 "human",
                 "Question: {query}\n\n"
+                "ChatHistory: {chat_history}\n\n"
                 "SQL Used:\n{sql}\n\n"
                 "sql_result:\n{sql_result}"
                 "search_result:\n{search_result}",
@@ -373,6 +430,7 @@ def response_generator_node(state: RAGState) -> RAGState:
     answer = nl_chain.invoke(
         {
             "query": state["query"],
+            "chat_history": state["chat_history"],
             "sql": query,
             "sql_result": sql_result,
             "search_result": search_result,
@@ -401,6 +459,7 @@ def build_rag_graph():
     workflow.add_node("sql_generator", sql_generator_node)
     workflow.add_node("sql_execution", sql_executor_node)
     workflow.add_node("response_generator", response_generator_node)
+    workflow.add_node("chit_chat_generator", chit_chat_generator_node)
     workflow.add_node("rag_retriever", rag_retriever)
     workflow.add_node("reranker", reranker)
     workflow.add_node("rewrite", query_rewriter)
@@ -414,7 +473,9 @@ def build_rag_graph():
         {
             "VECTOR_DB": "rag_retriever",
             "RDBMS": "sql_generator",
-            "CHIT_CHAT": "response_generator",
+            # "CHIT_CHAT": "response_generator",
+            "CHIT_CHAT": "chit_chat_generator",
+            "HYBRID": "rag_retriever",
         },
     )
 
@@ -453,10 +514,18 @@ def build_rag_graph():
 rag_graph = build_rag_graph()
 
 
-def run_search_agent(query: str, user_id: str = None):
+def run_search_agent(query: str, chat_history: list, user_id: str = None):
     print("============1. INSIDE run_search_agent ")
+    # Add chat history to the query for context if available
+    # if chat_history:
+    #     chat_context = " ".join(
+    #         [f"{entry['role']}: {entry['content']}" for entry in chat_history]
+    #     )
+    #     query = f"{chat_context} {query}"
+
     initial_state = {
         "query": query,
+        "chat_history": chat_history,
         "retrieved_docs": [],
         "reranked_docs": [],
         "response": {},

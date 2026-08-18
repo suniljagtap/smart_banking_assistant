@@ -4,7 +4,10 @@ from typing import Optional
 
 # query api endpoint request format
 class QueryRequest(BaseModel):
-    query: str = Field(description="The user's question")
+    query: str = (Field(description="The user's question"),)
+    chat_history: Optional[list[dict]] = Field(
+        default=None, description="The chat history for context"
+    )
 
 
 # query api endpoint response format

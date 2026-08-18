@@ -18,10 +18,10 @@ def query_documents_dprct(query: str):
     }
 
 
-def query_documents(query: str, user_id: str):
+def query_documents(query: str, chat_history: list, user_id: str):
     print(query)
     guard_input(query)
-    result = run_search_agent(query, user_id)
+    result = run_search_agent(query, chat_history, user_id)
 
     if isinstance(result, dict) and result.get("response"):
         result["response"] = guard_output(result["response"])

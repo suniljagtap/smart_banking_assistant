@@ -10,7 +10,7 @@ router = APIRouter(prefix="/api/v1/query")
 @router.post("/")
 def query_endpoint(request: QueryRequest) -> QueryResponse:
     try:
-        docs = query_documents(request.query, "user_id")
+        docs = query_documents(request.query, request.chat_history, "user_id")
     except GuardrailViolation as violation:
         raise HTTPException(
             status_code=400,
