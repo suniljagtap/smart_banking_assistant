@@ -491,32 +491,75 @@ if page == "Chatbot":
                                 else:
                                     st.success(answer)
 
-                                    # Citations
+                                    # Extract metadata from response_data
                                     citations = data.get("citations", [])
+                                    policy_citations = response_data.get(
+                                        "policy_citations", ""
+                                    )
+                                    document_name = response_data.get(
+                                        "document_name", ""
+                                    )
+                                    sql_query_executed = response_data.get(
+                                        "sql_query_executed", ""
+                                    )
 
-                                    if citations:
-                                        st.caption("📚 Sources")
-                                        for citation in citations:
+                                    # Display document information
+                                    if (
+                                        document_name is not None
+                                        and document_name != ""
+                                    ):
+                                        st.caption(f"📋 Document: **{document_name}**")
 
-                                            if not isinstance(
-                                                citation,
-                                                dict,
-                                            ):
-                                                continue
+                                    # Display SQL query executed
+                                    if sql_query_executed:
+                                        with st.expander("🔍 Query Executed"):
+                                            st.code(sql_query_executed, language="sql")
 
-                                            page_number = citation.get(
-                                                "page",
-                                                "N/A",
-                                            )
+                                    # Display citations and sources
+                                    if (
+                                        citations is not None and len(citations) > 0
+                                    ) or (
+                                        policy_citations is not None
+                                        and policy_citations != ""
+                                    ):
+                                        st.caption("📚 Sources:")
 
-                                            question = citation.get(
-                                                "question",
-                                                "Source",
-                                            )
+                                        # Handle dict format citations
+                                        if citations:
+                                            for citation in citations:
 
-                                            st.caption(
-                                                f"Page {page_number} — " f"{question}"
-                                            )
+                                                if not isinstance(
+                                                    citation,
+                                                    dict,
+                                                ):
+                                                    continue
+
+                                                page_number = citation.get(
+                                                    "page",
+                                                    "N/A",
+                                                )
+
+                                                question = citation.get(
+                                                    "question",
+                                                    "Source",
+                                                )
+
+                                                st.caption(
+                                                    f"Page {page_number} — "
+                                                    f"{question}"
+                                                )
+
+                                        # Handle string format citations
+                                        if policy_citations:
+                                            if isinstance(policy_citations, str):
+                                                # Parse semicolon-separated citations
+                                                citation_list = [
+                                                    c.strip()
+                                                    for c in policy_citations.split(";")
+                                                    if c.strip()
+                                                ]
+                                                for citation in citation_list:
+                                                    st.caption(citation)
 
                                     # Store assistant response
                                     st.session_state.messages.append(
