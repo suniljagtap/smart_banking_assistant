@@ -55,8 +55,9 @@ def rag_retriever(state: RAGState) -> RAGState:
                       Customer Service Officers, and Compliance Staff.
 
                       Your main task is to evaluate the user's input query and select the SINGLE most effective
-                      search tool to retrieve relevant policy documents and contextual data
+                      search tool to retrieve relevant policy documents and contextual data. 
 
+                                           
                       ### AVAILABLE SEARCH TOOLS
 
             1 **fts_search_tool: 
@@ -70,7 +71,7 @@ def rag_retriever(state: RAGState) -> RAGState:
             3 **hybrid_search_tool: 
             --** use case:** complete queries containing both strict metadata constraints and conceptual
             explanations.
-            --**Triggers:** queries combining numeric thresholds with policy terms or multip part 
+            --**Triggers:** queries combining numeric thresholds with policy terms or multiple part 
             compliance checks
 
         -The response should be solely based on the avaialble embeddings data and the raw chunks in the DB and no additional 
@@ -114,10 +115,6 @@ def rag_retriever(state: RAGState) -> RAGState:
 def query_classifier(state: RAGState) -> RAGState:
     llm = _get_llm()
     structured_llm = llm.with_structured_output(RouteDecision)
-
-    # 'CHIT_CHAT' - the query uses conversational small talk, greetings, pleasentries or casual
-    #                      questions with no data retrieval needs.
-
     prompt = ChatPromptTemplate.from_messages(
         [
             (
@@ -309,7 +306,7 @@ def reranker(state: RAGState):
         model="rerank-v3.5",
         query=state["query"],
         documents=[doc["content"] for doc in docs],
-        top_n=5,
+        top_n=10,
     )
     # Map Cohere result indices back to LangChain Document objects
     reranked_docs = [docs[r.index] for r in rerank_response.results]
@@ -404,6 +401,8 @@ def response_generator_node(state: RAGState) -> RAGState:
     sql_result = state.get("db_retrieved_docs")
     search_result = state.get("reranked_docs")
 
+    page_numbers = []
+
     llm = _get_llm()
     structured_llm = llm.with_structured_output(AIResponse)
     nl_answer_prompt = ChatPromptTemplate.from_messages(
@@ -411,8 +410,9 @@ def response_generator_node(state: RAGState) -> RAGState:
             (
                 "system",
                 """You are a helpful data analyst. Answer the user's question using
-               the SQL query results below. Be concise and format numbers/lists clearly.
-               Set policy_citations to empty string,
+               the SQL_result,search_result. Be concise and format numbers/lists clearly.
+               Provide the policy citations,page_no from the search_result.
+               Set policy_citations to empty string if there are citations in SQL_result,search_result
                page_no to 'N/A', and document_name to 'smart_banking_assistant_DB'.""",
             ),
             (
@@ -452,6 +452,19 @@ def response_generator_node(state: RAGState) -> RAGState:
     }
 
 
+def route_decision(state:RAGState):
+    route = state.get("route")
+    if route == "HYBRID":
+        return ["sql_generator","rag_retriever"]
+    elif route == "RDBMS":
+        return "sql_generator"
+    elif route == "VECTOR_DB":
+        return "rag_retriever"
+    elif route == "CHIT_CHAT":
+        return "chit_chat_generator"
+    return "chit_chat_generator"
+
+
 def build_rag_graph():
     workflow = StateGraph(RAGState)
 
@@ -467,17 +480,29 @@ def build_rag_graph():
     # the following is the starting point
     workflow.set_entry_point("router")
 
+    # workflow.add_conditional_edges(
+    #     "router",
+    #     lambda state: state["route"],
+    #     {
+    #         "VECTOR_DB": "rag_retriever",
+    #         "RDBMS": "sql_generator",
+    #         # "CHIT_CHAT": "response_generator",
+    #         "CHIT_CHAT": "chit_chat_generator",
+    #         #"HYBRID": "rag_retriever",
+    #     },
+    # )
+    
     workflow.add_conditional_edges(
         "router",
-        lambda state: state["route"],
+        route_decision,
         {
-            "VECTOR_DB": "rag_retriever",
-            "RDBMS": "sql_generator",
-            # "CHIT_CHAT": "response_generator",
-            "CHIT_CHAT": "chit_chat_generator",
-            "HYBRID": "rag_retriever",
-        },
+            "sql_generator" : "sql_generator",
+            "rag_retriever" : "rag_retriever",
+            "chit_chat_generator" : "chit_chat_generator",
+        }
+
     )
+
 
     workflow.add_edge("rag_retriever", "reranker")
 
